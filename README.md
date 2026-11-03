@@ -21,6 +21,7 @@ Taller de Deep Reinforcement Learning del Máster MIAX.
 | 3 | A3C asíncrono: 4 procesos, Adam compartido, retorno a n pasos y entropía |
 | 4 | Ajuste de A3C con Optuna (α, γ, β y t_max) |
 | 5 | Convergencia (5 semillas × 5 000 episodios), coste por episodio y test |
+| 6 | Extensión a datos reales (EUR/USD, S&P 500, *Energía*) con DQN: *walk-forward* de la parte 1, estado del profesor frente a estado ampliado de 8 variables |
 
 ## Resultados en test
 
@@ -37,6 +38,19 @@ Rentabilidad logarítmica media en 200 series nuevas. DQN y A3C: media de 5 semi
 - Con un estado de dos variables, las redes no superan a la tabla: evitan discretizar, pero no añaden información.
 - Coste por episodio: DQN 49 ms, A3C 9 ms con 4 procesos, tabla ~14 ms.
 
+## Datos reales (fase 6)
+
+Rentabilidad anual en test (bloques de 2020–2026, *walk-forward*). Q-Learning y Sarsa: mejor variante de la parte 1.
+
+| Mercado | Buy & hold | Q-Learning / Sarsa | DQN (profesor) | DQN (ampliado) |
+|---|---|---|---|---|
+| EUR/USD | 3.09 | 0.00–0.20 | 0.00 | 2.55 |
+| S&P 500 | 16.51 | 14.77–16.80 | 16.89 | 16.57 |
+| Energía | 13.60 | 12.44–13.41 | 13.06 | 10.49 |
+
+- El DQN llega al nivel de la tabla: queda dentro siempre (S&P 500, *Energía*) o fuera (EUR/USD), es decir, *buy & hold* o no operar.
+- El estado ampliado (8 variables) sobreajusta: peor en validación en S&P 500 y *Energía*; con datos diarios, el límite es la información del estado, no el modelo.
+
 ## Estructura
 
 | Fichero | Contenido |
@@ -47,6 +61,9 @@ Rentabilidad logarítmica media en 200 series nuevas. DQN y A3C: media de 5 semi
 | `dqn.py`, `a3c.py` | Agentes |
 | `ajuste.py` | Búsqueda de hiperparámetros con Optuna y confirmación |
 | `final.py` | Entrenamientos finales, convergencia, tiempos y test |
+| `reales.py` | Fase 6: datos reales, entorno con estado ampliado, DQN y *walk-forward* |
+| `datos_reales/` | Copia local de los precios (la misma de la parte 1) |
+| `taller_trader.ipynb` | Parte 1 (Q-Learning y Sarsa), referencia de la comparación |
 | `resultados/` | Modelos entrenados y búsquedas: el notebook los carga sin reentrenar |
 
 ## Uso
