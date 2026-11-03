@@ -1,0 +1,38 @@
+{
+ "dqn": {
+  "ciclo": {
+   "ms_por_episodio": 48.986759416002315,
+   "arranque_s": 0.0
+  },
+  "browniano": {
+   "ms_por_episodio": 48.599578081979416,
+   "arranque_s": 0.0
+  },
+  "reversion": {
+   "ms_por_episodio": 50.646659165999154,
+   "arranque_s": 0.0
+  },
+  "regimenes": {
+   "ms_por_episodio": 48.721956583991414,
+   "arranque_s": 0.0
+  }
+ },
+ "a3c": {
+  "ciclo": {
+   "ms_por_episodio": 8.947759582020808,
+   "arranque_s": 1.2038090839923825
+  },
+  "browniano": {
+   "ms_por_episodio": 9.420859499979997,
+   "arranque_s": 1.2679853330046171
+  },
+  "reversion": {
+   "ms_por_episodio": 9.713254916016012,
+   "arranque_s": 1.284719082992524
+  },
+  "regimenes": {
+   "ms_por_episodio": 20.21730883201235,
+   "arranque_s": 1.303591083997162
+  }
+ }
+}
