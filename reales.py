@@ -1,5 +1,5 @@
 """
-Fase 6: DQN con series de precios reales.
+Fase 7: DQN y A3C con series de precios reales.
 
 Mismo diseño que la fase 8 de la parte 1 (taller_trader.ipynb), para comparar directamente con Q-Learning y Sarsa:
 - Mercados: EUR/USD, S&P 500 con dividendos y Energía (10 petroleras y el Brent), copia local en datos_reales/.
@@ -218,6 +218,109 @@ def entrenar_dqn_real(mercado, variante, fin, config=None, n_episodios=N_EPISODI
             "ganancias": np.array(ganancias), "tiempo": time.perf_counter() - t0, "divergio": divergio}
 
 
+N_EPISODIOS_A3C = 2000  # el doble que el DQN: A3C usa cada transición una sola vez y aprende más despacio
+CONFIG_A3C_REAL = {"beta": 0.01, "t_max": 20}  # valores por defecto de a3c.py (no se ajustan aquí)
+
+
+def _identidad(obs):
+    return obs  # la observación de EntornoRealDRL ya está normalizada
+
+
+def _trabajador_real(rango, red_global, estado_adam, siguiente, bloqueo, cola, cfg, mercado, variante, fin, norm,
+                     repeticion, n_episodios):
+    """Trabajador de A3C: como a3c._trabajador, con una ventana de datos reales al azar en cada episodio."""
+    import traceback
+    from a3c import RedActorCritico, _adam_compartido, _episodio
+    try:
+        torch.set_num_threads(1)
+        rng = np.random.default_rng([repeticion, rango])
+        red = RedActorCritico(cfg["n_ocultas"], len(norm["cols"]) + 1)
+        optimizador = _adam_compartido(red_global, estado_adam, cfg["lr"])
+        n_series = precios(mercado).shape[1]
+        while True:
+            with bloqueo:
+                if siguiente.value >= n_episodios:
+                    break
+                episodio = siguiente.value
+                siguiente.value += 1
+            j = int(rng.integers(n_series))
+            inicio = int(rng.integers(HISTORIA, fin - L_BLOQUE))
+            env = entorno(mercado, j, inicio, inicio + L_BLOQUE, norm)
+            cola.put(("episodio", episodio, _episodio(red, red_global, optimizador, cfg, None, norm, rng,
+                                                      env=env, entrada=_identidad)))
+    except Exception:
+        cola.put(("error", rango, traceback.format_exc()))
+
+
+def entrenar_a3c_real(mercado, variante, fin, config=None, n_episodios=N_EPISODIOS_A3C, repeticion=0):
+    """A3C de a3c.py con episodios de datos reales; sin validación durante el entrenamiento: devuelve el modelo final."""
+    import queue
+    import torch.multiprocessing as tmp
+    from a3c import CONFIG_A3C, RedActorCritico
+
+    cfg = {**CONFIG_A3C, **CONFIG_A3C_REAL, **(config or {})}
+    norm = normalizacion(mercado, variante, fin)
+    n_entradas = len(norm["cols"]) + 1
+    torch.set_num_threads(1)
+    torch.manual_seed(repeticion)
+    red_global = RedActorCritico(cfg["n_ocultas"], n_entradas)
+    red_global.share_memory()
+    estado_adam = [(torch.zeros(()).share_memory_(), torch.zeros_like(p.data).share_memory_(),
+                    torch.zeros_like(p.data).share_memory_()) for p in red_global.parameters()]
+
+    ctx = tmp.get_context("spawn")
+    siguiente = ctx.Value("i", 0, lock=False)
+    bloqueo, cola = ctx.Lock(), ctx.Queue()
+    ganancias = np.full(n_episodios, np.nan)
+    terminados, divergio = 0, False
+    t0 = time.perf_counter()
+    trabajadores = [ctx.Process(target=_trabajador_real, daemon=True,
+                                args=(k, red_global, estado_adam, siguiente, bloqueo, cola, cfg, mercado, variante,
+                                      fin, norm, repeticion, n_episodios))
+                    for k in range(cfg["n_trabajadores"])]
+    try:
+        for t in trabajadores:
+            t.start()
+        while terminados < n_episodios:
+            try:
+                tipo, origen, contenido = cola.get(timeout=1)
+            except queue.Empty:
+                if not any(t.is_alive() for t in trabajadores):
+                    raise RuntimeError("Los trabajadores han terminado antes de completar los episodios")
+                continue
+            if tipo == "error":
+                raise RuntimeError(f"Error en el trabajador {origen}:\n{contenido}")
+            if contenido["divergio"]:
+                divergio = True
+                break
+            ganancias[origen] = contenido["ganancia"]
+            terminados += 1
+    finally:
+        with bloqueo:
+            siguiente.value = n_episodios  # los trabajadores no empiezan más episodios
+        for t in trabajadores:
+            t.join(timeout=30)
+            if t.is_alive():
+                t.terminate()
+
+    return {"pesos": copia_pesos(red_global), "norm": norm, "config": cfg, "n_entradas": n_entradas,
+            "ganancias": ganancias[:terminados], "tiempo": time.perf_counter() - t0, "divergio": divergio}
+
+
+def red_a3c_desde_resultado(r):
+    from a3c import red_desde_pesos
+    return red_desde_pesos(r["pesos"], r["config"]["n_ocultas"], r["n_entradas"])
+
+
+def politica_a3c(red):
+    """Política voraz: la acción más probable."""
+    def politica(obs, env):
+        with torch.no_grad():
+            logits, _ = red(torch.from_numpy(obs))
+        return int(torch.argmax(logits))
+    return politica
+
+
 def red_desde_resultado(r):
     red = RedQ(r["config"]["n_ocultas"], r["n_entradas"])
     red.load_state_dict(r["pesos"])
@@ -277,22 +380,35 @@ def nombre_tarea(conjunto, mercado, variante, lr, gamma, rep, bloque):
     return f"{conjunto}_{m}_{variante}_lr{lr:g}_g{gamma:g}_r{rep}_b{bloque[0]}.pkl"
 
 
-def tarea(conjunto, mercado, variante, lr, gamma, rep, bloque, carpeta, n_episodios=N_EPISODIOS):
-    """Entrena con lo anterior al bloque (menos el embargo) y lo juega. Si ya está en disco, lo carga."""
-    ruta = Path(carpeta) / nombre_tarea(conjunto, mercado, variante, lr, gamma, rep, bloque)
+def tarea(conjunto, mercado, variante, lr, gamma, rep, bloque, carpeta, n_episodios=None, algoritmo="dqn"):
+    """
+    Entrena (DQN o A3C) con lo anterior al bloque (menos el embargo) y lo juega. Si ya está en disco, lo carga.
+    """
+    prefijo = "" if algoritmo == "dqn" else f"{algoritmo}_"
+    ruta = Path(carpeta) / (prefijo + nombre_tarea(conjunto, mercado, variante, lr, gamma, rep, bloque))
     if ruta.exists():
         with open(ruta, "rb") as f:
             return pickle.load(f)
-    r = entrenar_dqn_real(mercado, variante, bloque[0] - EMBARGO, {"lr": lr, "gamma": gamma},
-                          n_episodios=n_episodios, repeticion=rep)
-    red = red_desde_resultado(r)
-    salida = {"series": evaluar_bloque(politica_red(red), mercado, bloque, r["norm"]),
+    fin = bloque[0] - EMBARGO
+    if algoritmo == "dqn":
+        r = entrenar_dqn_real(mercado, variante, fin, {"lr": lr, "gamma": gamma},
+                              n_episodios=n_episodios or N_EPISODIOS, repeticion=rep)
+        politica = politica_red(red_desde_resultado(r))
+    else:
+        r = entrenar_a3c_real(mercado, variante, fin, {"lr": lr, "gamma": gamma},
+                              n_episodios=n_episodios or N_EPISODIOS_A3C, repeticion=rep)
+        politica = politica_a3c(red_a3c_desde_resultado(r))
+    salida = {"series": evaluar_bloque(politica, mercado, bloque, r["norm"]),
               "tiempo": r["tiempo"], "divergio": r["divergio"], "ganancias": r["ganancias"]}
     if variante == "profesor":
         salida["pesos"], salida["norm"] = r["pesos"], r["norm"]  # para leer la política aprendida
     with open(ruta, "wb") as f:
         pickle.dump(salida, f)
     return salida
+
+
+def tarea_a3c(conjunto, mercado, variante, lr, gamma, rep, bloque, carpeta):
+    return tarea(conjunto, mercado, variante, lr, gamma, rep, bloque, carpeta, algoritmo="a3c")
 
 
 def tareas(conjunto, combinaciones, reps=REPS):

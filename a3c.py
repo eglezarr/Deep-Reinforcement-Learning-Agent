@@ -66,8 +66,8 @@ class RedActorCritico(nn.Module):
         return self.actor(h), self.critico(h).squeeze(-1)
 
 
-def red_desde_pesos(pesos, n_ocultas=64):
-    red = RedActorCritico(n_ocultas)
+def red_desde_pesos(pesos, n_ocultas=64, n_entradas=2):
+    red = RedActorCritico(n_ocultas, n_entradas)
     red.load_state_dict(pesos)
     red.eval()
     return red
@@ -107,9 +107,18 @@ def _adam_compartido(red_global, estado_adam, lr):
     return optimizador
 
 
-def _episodio(red, red_global, optimizador, cfg, prices, norm, rng):
-    """Juega un episodio con la política estocástica y actualiza la red global cada t_max pasos."""
-    env = SimpleTradingEnv(prices)
+def _episodio(red, red_global, optimizador, cfg, prices, norm, rng, env=None, entrada=None):
+    """
+    Juega un episodio con la política estocástica y actualiza la red global cada t_max pasos.
+    Por defecto, una serie sintética con el entorno de la plantilla y la tendencia normalizada (fases 3 a 5).
+    env y entrada permiten otro entorno y otra transformación de la observación (fase 7, datos reales);
+    la recompensa se divide siempre por norm["desv_retorno"].
+    """
+    if env is None:
+        env = SimpleTradingEnv(prices)
+    if entrada is None:
+        def entrada(o):
+            return normalizar_obs(o, norm["media"], norm["desv"])
     obs, info = env.reset()
     terminado = False
     perdidas, entropias, valores = [], [], []
@@ -121,7 +130,7 @@ def _episodio(red, red_global, optimizador, cfg, prices, norm, rng):
         # 2. Hasta t_max pasos, eligiendo cada acción al azar según las probabilidades de la política
         estados, acciones, recompensas = [], [], []
         for _ in range(cfg["t_max"]):
-            s = normalizar_obs(obs, norm["media"], norm["desv"])
+            s = entrada(obs)
             with torch.no_grad():
                 logits, _ = red(torch.from_numpy(s))
             p = torch.softmax(logits, dim=0).numpy().astype(np.float64)
@@ -135,7 +144,7 @@ def _episodio(red, red_global, optimizador, cfg, prices, norm, rng):
 
         # 3. Retorno a n pasos, de atrás hacia delante: parte de V del último estado (0 si el episodio termina)
         with torch.no_grad():
-            R = 0.0 if terminado else float(red(torch.from_numpy(normalizar_obs(obs, norm["media"], norm["desv"])))[1])
+            R = 0.0 if terminado else float(red(torch.from_numpy(entrada(obs)))[1])
         retornos = np.empty(len(recompensas), dtype=np.float32)
         for i in range(len(recompensas) - 1, -1, -1):
             R = recompensas[i] + cfg["gamma"] * R
